@@ -11,6 +11,8 @@ import "../../utils/TestWrappedNativeToken.sol";
 import "../../utils/TestUniswap.sol";
 import "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
 import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 contract TestTokenPaymasterV07 is Test {
     TokenPaymaster paymaster;
@@ -28,11 +30,15 @@ contract TestTokenPaymasterV07 is Test {
     address paymasterOwner;
     address user;
     uint256 userKey;
+    address payable bundler;
+    address payable receiver;
 
     function setUp() external {
         beneficiary = payable(makeAddr("beneficiary"));
         paymasterOwner = makeAddr("paymasterOwner");
         (user, userKey) = makeAddrAndKey("user");
+        bundler = payable(makeAddr("bundler"));
+        receiver = payable(makeAddr("receiver"));
 
         entryPoint = new EntryPoint();
         accountfactory = new SimpleAccountFactory(entryPoint);
@@ -43,6 +49,7 @@ contract TestTokenPaymasterV07 is Test {
         uniswap = new TestUniswap(wrappedNative);
         tokenOracle = new TestOracle2(1, 18);
         nativeOracle = new TestOracle2(1, 18);
+        accountfactory = new SimpleAccountFactory(entryPoint);
 
         paymasterFactory = new PaymasterFactoryV07(
             IOracle(address(tokenOracle)),
@@ -63,10 +70,9 @@ contract TestTokenPaymasterV07 is Test {
 
         vm.stopPrank();
     }
-    // priceMarkUp 검사(O)
+
     // refundPostOpCost 검사
-    // validation 단계에서 transferFrom을 통해 가져오나
-    // postOp 단계에서 transfer를 통해 돌려주나
+    // postOp 단계에서 transfer를 통해 정확히 돌려주나
     // withDrawTo가 있냐
 
     function testPriceMarkUpisValid() external {
@@ -89,31 +95,35 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
     }
 
-    // 고도화 필요
-    /**
-        paymasterAndData 생성
-        user의 key로 sign
-        handleOps 호출
-     */
     function testGetFundInValidation() external {
-        uint256 amount = 100;
-        token.sudoMint(user, amount);
+        uint256 initBalance = 1e18;
+        token.sudoMint(user, initBalance);
         vm.startPrank(user);
-        token.approve(address(paymaster), amount);
+        token.approve(address(paymaster), type(uint256).max);
         vm.stopPrank();
+
+        (, , uint48 _refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+
+        bytes memory paymasterAndDataStatic = abi.encodePacked(
+            address(paymaster),
+            uint128(150),
+            uint128(_refundPostopCost + 1), // bigger than refundPostOpCost
+            uint256(1e24)
+        );
 
         PackedUserOperation memory userOp = PackedUserOperation({
             sender: user,
             nonce: 0,
             initCode: "0x",
             callData: "0x",
-            accountGasLimits: 0,
-            preVerificationGas: 0,
-            gasFees: bytes32(amount),
-            paymasterAndData: "0x00000000000000000000000000000000000000000000000000",
+            accountGasLimits: bytes32(uint256(1e8)),
+            preVerificationGas: 1e8,
+            gasFees: bytes32(uint256(500000)),
+            paymasterAndData: paymasterAndDataStatic,
             signature: "0x"
         });
-        console.log(userOp.paymasterAndData.length);
+
+        paymaster.updateCachedPrice(false);
 
         vm.startPrank(address(entryPoint));
         bytes memory context;
@@ -121,12 +131,149 @@ contract TestTokenPaymasterV07 is Test {
         (context, validationData) = paymaster.validatePaymasterUserOp(
             userOp,
             keccak256(abi.encode(userOp)),
-            0
+            1e8
         );
         vm.stopPrank();
 
-        uint256 balance = token.balanceOf(address(paymaster));
-        vm.expectRevert("Test Failed");
-        assertEq(balance, amount);
+        uint256 balance = token.balanceOf(address(user));
+        vm.expectRevert();
+        assertEq(balance, initBalance);
+    }
+
+    function testAfterBalances() external {
+        // first userOp cost is expensive than second and third userOp, because of cold storage access is expensive than warm storage access
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        vm.deal(user, 1e18);
+        vm.startPrank(user);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        vm.deal(address(userAccount), 3e18);
+
+        uint256 amount = 10000e18;
+        token.sudoMint(address(userAccount), amount);
+        token.sudoApprove(address(userAccount), address(paymaster), amount);
+
+        (, , uint48 _refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+
+        bytes memory paymasterAndDataStatic = abi.encodePacked(
+            address(paymaster),
+            uint128(5000000),
+            uint128(_refundPostopCost + 100000), // bigger than refundPostOpCost
+            uint256(1e24)
+        );
+
+        PackedUserOperation memory userOp = PackedUserOperation({
+            sender: address(userAccount),
+            nonce: 0,
+            initCode: "",
+            callData: abi.encodeWithSelector(
+                SimpleAccount.execute.selector,
+                receiver,
+                uint256(1e18),
+                hex""
+            ),
+            accountGasLimits: bytes32(
+                abi.encodePacked(uint128(10000000), uint128(1000000))
+            ),
+            preVerificationGas: 1e5,
+            gasFees: bytes32(abi.encodePacked(uint128(300000), uint128(30000))),
+            paymasterAndData: paymasterAndDataStatic,
+            signature: ""
+        });
+
+        userOp.signature = signUserOp(userOp, userKey);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        uint256 balance = token.balanceOf(address(userAccount));
+
+        uint gasCost1 = amount - balance;
+        amount = balance;
+
+        console.log("beneficiary balance:", beneficiary.balance);
+        console.log("gas cost1:", gasCost1);
+
+        userOp.nonce = 1;
+        userOp.signature = signUserOp(userOp, userKey);
+
+        ops[0] = userOp;
+
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        balance = token.balanceOf(address(userAccount));
+        uint gasCost2 = amount - balance;
+        amount = balance;
+
+        console.log("beneficiary balance:", beneficiary.balance);
+        console.log("gas cost2:", gasCost2);
+
+        paymasterAndDataStatic = abi.encodePacked(
+            address(paymaster),
+            uint128(500000000), // *= 100
+            uint128(_refundPostopCost + 100000), // bigger than refundPostOpCost
+            uint256(1e24)
+        );
+        userOp.paymasterAndData = paymasterAndDataStatic;
+        userOp.nonce = 2;
+        userOp.signature = signUserOp(userOp, userKey);
+
+        ops[0] = userOp;
+
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        balance = token.balanceOf(address(userAccount));
+        uint gasCost3 = amount - balance;
+
+        console.log("beneficiary balance:", beneficiary.balance);
+        console.log("gas cost3:", gasCost3);
+
+        vm.assertEq(gasCost2, gasCost3);
+    }
+
+    function signUserOp(
+        PackedUserOperation memory op,
+        uint256 _key
+    ) public view returns (bytes memory signature) {
+        bytes32 hash = entryPoint.getUserOpHash(op);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            _key,
+            MessageHashUtils.toEthSignedMessageHash(hash)
+        );
+        signature = abi.encodePacked(r, s, v);
+    }
+
+    function submitUserOp(PackedUserOperation memory op) public {
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = op;
+        entryPoint.handleOps(ops, beneficiary);
+    }
+
+    function check(address userAccount) public {
+        console.log("bundler balance :", bundler.balance);
+        console.log("paymaster balance :", address(paymaster).balance);
+        console.log("user balance :", user.balance);
+        console.log(
+            "paymaster's deposit to EP :",
+            entryPoint.balanceOf(address(paymaster))
+        );
+        console.log(
+            "userAccount token :",
+            token.balanceOf(address(userAccount))
+        );
+        console.log("");
     }
 }

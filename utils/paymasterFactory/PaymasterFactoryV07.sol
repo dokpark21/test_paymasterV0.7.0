@@ -69,7 +69,7 @@ contract PaymasterFactoryV07 is Ownable {
             priceMaxAge: 86400,
             refundPostopCost: 40000,
             minEntryPointBalance: 0,
-            priceMarkup: (1e26 * 15) / 10
+            priceMarkup: 1e26
         });
 
         _uniswapHelperConfig = UniswapHelperConfig({
