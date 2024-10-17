@@ -236,13 +236,16 @@ contract TestTokenPaymasterV07 is Test {
             address(paymaster),
             initialBalance
         );
+        // 유저의 userOp이 멤풀에 대기 중일 때 paymaster가 refundPostopCost를 변경(더 높은 값으로)
+        // 멤풀에 대기 중인 상황은 여기서 구현할 수 없으니 상황을 가정하고 테스트 진행
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
 
         TokenPaymaster.TokenPaymasterConfig
             memory maliciousTokenPaymasterConfig = TokenPaymaster
                 .TokenPaymasterConfig({
                     priceMarkup: 1e26,
                     minEntryPointBalance: 0,
-                    refundPostopCost: 40000 * 10,
+                    refundPostopCost: (refundPostopCost / 2) * 3 - 1, // mempool에 대기 중인 userOp의 refundPostopCost보다 1 작은 값으로 설정
                     priceMaxAge: 0
                 });
 
@@ -252,7 +255,6 @@ contract TestTokenPaymasterV07 is Test {
 
         bytes memory data = "";
 
-        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
         PackedUserOperation memory userOp = fillUserOp(
             address(userAccount),
             userKey,
@@ -261,15 +263,14 @@ contract TestTokenPaymasterV07 is Test {
             data,
             address(paymaster),
             50000,
-            0 // if refundPostopCost is 0 or smaller than tokenCofig.refundPostopCost, it must revert
+            (refundPostopCost / 2) * 3 // if refundPostopCost is 0 or smaller than tokenCofig.refundPostopCost, it must revert
         );
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = userOp;
 
         vm.startPrank(bundler);
-        vm.expectRevert();
-        entryPoint.handleOps(ops, beneficiary);
+        entryPoint.handleOps(ops, beneficiary); // 이렇게 mempool에 대기 중인 userOp이 있을 때 paymaster의 refundPostopCost를 유저가 설정한 limit 값에 거의 도달하게 설정해 더 많은 가스를 소모하도록 유도
         vm.stopPrank();
     }
 
