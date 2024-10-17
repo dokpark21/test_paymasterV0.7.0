@@ -32,7 +32,6 @@ contract TestTokenPaymasterV07 is Test {
     address paymasterOwner;
     address user;
     uint256 userKey;
-    address payable bundler;
     address payable receiver;
 
     function setUp() external {
