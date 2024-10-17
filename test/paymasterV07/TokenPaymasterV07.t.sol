@@ -166,7 +166,7 @@ contract TestTokenPaymasterV07 is Test {
             "",
             address(paymaster),
             50000,
-            refundPostopCost * 10
+            refundPostopCost + 20000 // == 60000 is pass value
         );
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
@@ -204,6 +204,7 @@ contract TestTokenPaymasterV07 is Test {
             5000000, // *= 100 from userOp 2
             refundPostopCost * 10
         );
+
         ops[0] = userOp3;
         entryPoint.handleOps(ops, beneficiary);
         uint256 gas3 = token.balanceOf(address(userAccount));
@@ -215,6 +216,156 @@ contract TestTokenPaymasterV07 is Test {
         assert(initialBalance > balance);
 
         assertEq(useGas1, useGas2);
+    }
+
+    function testIfMaliciousPaymasterCanDrainUser() external {
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 2e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(
+            address(userAccount),
+            address(paymaster),
+            initialBalance
+        );
+
+        TokenPaymaster.TokenPaymasterConfig
+            memory maliciousTokenPaymasterConfig = TokenPaymaster
+                .TokenPaymasterConfig({
+                    priceMarkup: 1e26,
+                    minEntryPointBalance: 0,
+                    refundPostopCost: 40000 * 10,
+                    priceMaxAge: 0
+                });
+
+        vm.startPrank(paymasterOwner);
+        paymaster.setTokenPaymasterConfig(maliciousTokenPaymasterConfig);
+        vm.stopPrank();
+
+        bytes memory data = "";
+
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+        PackedUserOperation memory userOp = fillUserOp(
+            address(userAccount),
+            userKey,
+            address(0),
+            0,
+            data,
+            address(paymaster),
+            50000,
+            0 // if refundPostopCost is 0 or smaller than tokenCofig.refundPostopCost, it must revert
+        );
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+
+        vm.startPrank(bundler);
+        vm.expectRevert();
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+    }
+
+    function testBundleRevert() external {
+        address user1;
+        uint256 userKey1;
+        address user2;
+        uint256 userKey2;
+        (user1, userKey1) = makeAddrAndKey("user1");
+        (user2, userKey2) = makeAddrAndKey("user2");
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        vm.deal(user2, 2e18);
+        vm.startPrank(user1);
+        SimpleAccount userAccount1 = accountfactory.createAccount(user1, 0);
+        vm.stopPrank();
+
+        vm.deal(user2, 2e18);
+        vm.startPrank(user2);
+        SimpleAccount userAccount2 = accountfactory.createAccount(user2, 0);
+        vm.stopPrank();
+
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 2e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(
+            address(userAccount),
+            address(paymaster),
+            initialBalance
+        );
+
+        token.sudoMint(address(userAccount1), initialBalance);
+        token.sudoApprove(
+            address(userAccount1),
+            address(paymaster),
+            initialBalance
+        );
+
+        token.sudoMint(address(userAccount2), initialBalance);
+        token.sudoApprove(
+            address(userAccount2),
+            address(paymaster),
+            initialBalance
+        );
+
+        // generate userOp, dummy userOp
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+        PackedUserOperation memory userOp = fillUserOp(
+            address(userAccount),
+            userKey,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 10 // == 60000 is pass value
+        );
+
+        PackedUserOperation memory userOp1 = fillUserOp(
+            address(userAccount1),
+            userKey1,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 10000 // == 60000 is pass value
+        );
+
+        PackedUserOperation memory userOp2 = fillUserOp(
+            address(userAccount2),
+            userKey2,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 10000 // == 60000 is pass value
+        );
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](3);
+        ops[0] = userOp;
+        ops[1] = userOp1;
+        ops[2] = userOp2;
+
+        vm.deal(bundler, 10e18);
+
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
     }
 
     function signUserOp(
@@ -286,7 +437,7 @@ contract TestTokenPaymasterV07 is Test {
         op.signature = signUserOp(op, _key);
         return op;
     }
-
+    // 660000000
     function fillpaymasterAndData(
         address _paymaster,
         uint256 _validationGas,
@@ -300,5 +451,3 @@ contract TestTokenPaymasterV07 is Test {
         );
     }
 }
-
-// forge test --match-test testAfterBalances -vvvvv
