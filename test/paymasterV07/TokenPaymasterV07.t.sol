@@ -145,7 +145,7 @@ contract TestTokenPaymasterV07 is Test {
 
         uint256 initialBalance = 10e18;
 
-        vm.deal(user, 1e18);
+        vm.deal(user, 2e18);
         SimpleAccount userAccount = accountfactory.createAccount(user, 0);
         vm.stopPrank();
 
@@ -156,7 +156,7 @@ contract TestTokenPaymasterV07 is Test {
             initialBalance
         );
 
-        // generate userOp
+        // generate userOp, dummy userOp
         (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
         PackedUserOperation memory userOp = fillUserOp(
             address(userAccount),
@@ -175,45 +175,46 @@ contract TestTokenPaymasterV07 is Test {
         vm.deal(bundler, 10e18);
 
         vm.startPrank(bundler);
-        uint256 gas1 = token.balanceOf(address(userAccount));
         entryPoint.handleOps(ops, beneficiary);
-        uint256 gas2 = token.balanceOf(address(userAccount));
 
         PackedUserOperation memory userOp2 = fillUserOp(
             address(userAccount),
             userKey,
-            address(0),
-            0,
+            receiver,
+            1e18,
             "",
             address(paymaster),
             50000,
             refundPostopCost * 10
         );
         ops[0] = userOp2;
+        uint256 gas1 = token.balanceOf(address(userAccount));
         entryPoint.handleOps(ops, beneficiary);
-        uint256 gas3 = token.balanceOf(address(userAccount));
+        uint256 gas2 = token.balanceOf(address(userAccount));
+
+        uint256 useGas1 = gas1 - gas2;
 
         PackedUserOperation memory userOp3 = fillUserOp(
             address(userAccount),
             userKey,
-            address(0),
-            0,
+            receiver,
+            1e18,
             "",
             address(paymaster),
-            50000,
+            5000000, // *= 100 from userOp 2
             refundPostopCost * 10
         );
         ops[0] = userOp3;
         entryPoint.handleOps(ops, beneficiary);
-        uint256 gas4 = token.balanceOf(address(userAccount));
+        uint256 gas3 = token.balanceOf(address(userAccount));
 
-        console.log("gas 1 :", gas1 - gas2);
-        console.log("gas 2 :", gas2 - gas3);
-        console.log("gas 3 :", gas3 - gas4);
+        uint256 useGas2 = gas2 - gas3;
         vm.stopPrank();
 
         uint256 balance = token.balanceOf(address(userAccount));
         assert(initialBalance > balance);
+
+        assertEq(useGas1, useGas2);
     }
 
     function signUserOp(
