@@ -6,13 +6,13 @@ import "account-abstraction-v7/samples/SimpleAccountFactory.sol";
 import "account-abstraction-v7/core/EntryPoint.sol";
 import "account-abstraction-v7/samples/SimpleAccount.sol";
 import "account-abstraction-v7/interfaces/PackedUserOperation.sol";
-import "../../utils/TestERC20.sol";
-import "../../utils/TestWrappedNativeToken.sol";
-import "../../utils/TestUniswap.sol";
-import "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
-import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "account-abstraction-v7/test/TestERC20.sol";
+import "account-abstraction-v7/test/TestWrappedNativeToken.sol";
+import "account-abstraction-v7/test/TestUniswap.sol";
+import "../utils/PaymasterFactoryV07.sol";
+import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../utils/PaymasterFactoryV07.sol";
+// import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+// import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "account-abstraction-v7/core/UserOperationLib.sol";
 
 contract TestTokenPaymasterV07 is Test {
@@ -72,10 +72,165 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
     }
 
-    // refundPostOpCost 검사
-    // postOp 단계에서 transfer를 통해 정확히 돌려주나
-    // withDrawTo가 있냐
+    // cold access가 warm access보다 gas가 많이 들기 때문에 제대로된 gas 비교를 위해서는 처음에 dummy userOp을 cold access로 보내줘야 함, 이를 증명하기 위한 test case
+    function testColdAccessAndWarmAccess() external {
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
 
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 1e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(address(userAccount), address(paymaster), initialBalance);
+
+        vm.deal(bundler, 10e18);
+        uint256 gas1 = token.balanceOf(address(userAccount));
+        (,,uint48 refundPostopCost,) = paymaster.tokenPaymasterConfig();
+        // 처음 cold access를 통과하기 위해서는 postOpGasLimit를 refundPostopCost의 대략 1.5배로 설정해줘야함
+        PackedUserOperation memory userOp = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, (refundPostopCost * 3) / 2);
+
+        vm.startPrank(bundler);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+        entryPoint.handleOps(ops, beneficiary); // cold access
+        uint256 gas2 = token.balanceOf(address(userAccount));
+
+        PackedUserOperation memory userOp2 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
+        ops[0] = userOp2;
+        entryPoint.handleOps(ops, beneficiary); // warm access 1
+        uint256 gas3 = token.balanceOf(address(userAccount));
+
+        PackedUserOperation memory userOp3 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
+        ops[0] = userOp3;
+        entryPoint.handleOps(ops, beneficiary); // warm access 2
+        uint256 gas4 = token.balanceOf(address(userAccount));
+
+        vm.stopPrank();
+
+        uint256 cold = gas1 - gas2;
+        uint256 warm1 = gas2 - gas3;
+        uint256 warm2 = gas3 - gas4;
+        
+        console.log("Cold Access   :", cold);
+        console.log("Warm Access 1 :", warm1);
+        console.log("Warm Access 2 :", warm2);
+
+        assert((cold > warm1) && warm1 == warm2);
+    }
+
+    // malicious user가 1st validation은 통과하고 2nd validation의 postOp에서 revert를 내도록 postOpGasLimit를 설정할 수 있음
+    // 이 case의 경우, paymaster의 opsSeen이 1 증가하고 opsIncluded는 변하지 않아서 평판 공격이 가능
+    function testPassValidationButRevertIn2ndValidation() external {
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 1e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(address(userAccount), address(paymaster), initialBalance);
+
+        uint256 gas1 = token.balanceOf(address(userAccount));
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+        PackedUserOperation memory userOp = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+
+        vm.deal(bundler, 10e18);
+
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        uint256 gas2 = token.balanceOf(address(userAccount));
+
+        console.log("attack cost :", gas1 - gas2);
+    }
+
+    // malicious paymaster가 refundPostopCost를 조작하여 user의 자금을 부당하게 더 되돌려 받는 공격
+    // forge test --match-test testIfMaliciousPaymasterCanDrainUser -vvvvv --via-ir
+    function testIfMaliciousPaymasterCanDrainUser() external {
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 2e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(address(userAccount), address(paymaster), initialBalance);
+
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+        PackedUserOperation memory userOp = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, (refundPostopCost * 3) / 2);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+
+        vm.deal(bundler, 10e18);
+
+        vm.startPrank(bundler);
+        // 1. dummy userOp for cold access
+        entryPoint.handleOps(ops, beneficiary);
+
+        // user는 postOpGasLimit를 refundPostopCost의 1.5배로 설정
+        PackedUserOperation memory userOp2 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, (refundPostopCost * 3) / 2);
+        ops[0] = userOp2;
+        // 2. userOp이 정상적인 경우(warm access), 얼마나 cost가 드는지 확인
+        uint256 gas1 = token.balanceOf(address(userAccount));
+        entryPoint.handleOps(ops, beneficiary);
+        uint256 gas2 = token.balanceOf(address(userAccount));
+
+        console.log("userOp cost before changing refundPostopCost:", gas1 - gas2);
+        vm.stopPrank();
+
+        // userOp2와 같은 userOp3 생성
+        PackedUserOperation memory userOp3 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, (refundPostopCost * 3) / 2);
+        ops[0] = userOp3;
+
+        // 3. userOp이 first validation 통과 후 mempool에서 대기 중일 때, paymaster가 refuncPostopCost를 높였다고 가정
+        TokenPaymaster.TokenPaymasterConfig memory malicioustokenPaymasterConfig = TokenPaymaster.TokenPaymasterConfig({
+            priceMaxAge: 86400,
+            refundPostopCost: (refundPostopCost * 3) / 2 - 1, // malicious value (postOpGasLimit의 1.5배보다 1 작게 설정)
+            minEntryPointBalance: 0,
+            priceMarkup: 1e26
+        });
+
+        vm.startPrank(paymasterOwner);
+        paymaster.setTokenPaymasterConfig(malicioustokenPaymasterConfig);
+        // console.log("paymaster changed refundPostopCost to malicious value");
+        vm.stopPrank();
+
+        // 4. 같은 userOp을 다시 보냈을 때의 cost 확인 (대기중이던 userOp이 실행됐을 때)
+        vm.startPrank(bundler);
+        entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        uint256 gas3 = token.balanceOf(address(userAccount));
+
+        console.log("userOp cost after changing refundPostopCost:", gas2 - gas3);
+
+        assert(gas2 - gas3 > gas1 - gas2); // user는 원래 내야 하는 cost보다 높은 cost를 내야 하게 됨
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- //
+
+    // priceMarkup을 비정상적인 값으로 조작할 수 있는지 확인
     function testPriceMarkUpisValid() external {
         // pricePriceMarkUp
         // if PRICE_DENOMINATOR is different, please change it
@@ -96,31 +251,12 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
     }
 
-    // 고도화 필요
-    /**
-        paymasterAndData 생성
-        user의 key로 sign
-        handleOps 호출
-     */
     // validation에서 user의 token이 빠져나갔는지 확인
     function testGetFundInValidation() external {
-        uint256 initBalance = 1e10;
-        token.sudoMint(user, initBalance);
-        vm.startPrank(user);
-        token.approve(address(paymaster), type(uint256).max);
-        vm.stopPrank();
+        setUser();
+        uint256 initBalance = token.balanceOf(user);
 
         (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
-        // PackedUserOperation memory userOp = fillUserOp(
-        //     user,
-        //     userKey,
-        //     address(0),
-        //     0,
-        //     "",
-        //     address(paymaster),
-        //     50000,
-        //     refundPostopCost + 1
-        // );
         PackedUserOperation memory userOp = fillUserOp(address(user), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
 
         vm.startPrank(address(entryPoint));
@@ -138,163 +274,42 @@ contract TestTokenPaymasterV07 is Test {
         assert(initBalance > balance);
     }
 
-    function testPassValidationButRevertIn2ndValidation() external {
-        vm.deal(paymasterOwner, 10e18);
+    // user의 자금을 넣고 빼는 동작이 가능한지 확인
+    // 해당 test는 BasePaymaster에서의 위협에 대한 test이다.
+    // 보류
+    function testUserDepositAndWithdraw() external {
+        setUser();
+
+        uint256 initUserBalance = user.balance;
+        uint256 initPaymasterBalance = address(paymaster).balance;
+        
+        vm.startPrank(user);
+        paymaster.deposit{value: 1 ether}();
+        vm.stopPrank();
+
+        // paymaster의 deposit을 통해 EP에 자금을 deposit하는 것이므로 paymaster의 balance가 변하면 안됨
+        assert(address(paymaster).balance == initPaymasterBalance);
+
         vm.startPrank(paymasterOwner);
-        entryPoint.depositTo{value: 10e18}(address(paymaster));
-        vm.stopPrank();
-
-        uint256 initialBalance = 10e18;
-
-        vm.deal(user, 1e18);
-        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
-        vm.stopPrank();
-
-        token.sudoMint(address(userAccount), initialBalance);
-        token.sudoApprove(address(userAccount), address(paymaster), initialBalance);
-
-        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
-        PackedUserOperation memory userOp = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
-
-        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
-        ops[0] = userOp;
-
-        vm.deal(bundler, 10e18);
-
-        vm.startPrank(bundler);
-        entryPoint.handleOps(ops, beneficiary);
+        paymaster.withdrawTo(payable(user), 1 ether);
+        assert(user.balance == initUserBalance);
         vm.stopPrank();
     }
 
-    function testAfterBalances() external {
-        vm.deal(paymasterOwner, 10e18);
-        vm.startPrank(paymasterOwner);
-        entryPoint.depositTo{value: 10e18}(address(paymaster));
-        vm.stopPrank();
+    // VerifyingPaymaster과 같이 signature 검증을 하는 paymaster에만 해당하는 함수 -> test해보려면 VerifyingPaymaster의 validatePaymasterUserOp함수를 호출해야함
+    // 보류
+    function testUserSignatureFail() external {
 
-        uint256 initialBalance = 10e18;
-
-        vm.deal(user, 1e18);
-        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
-        vm.stopPrank();
-
-        token.sudoMint(address(userAccount), initialBalance);
-        token.sudoApprove(address(userAccount), address(paymaster), initialBalance);
-
-        // generate userOp
-        (,,uint48 refundPostopCost,) = paymaster.tokenPaymasterConfig();
-        PackedUserOperation memory userOp = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
-
-        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
-        ops[0] = userOp;
-
-        vm.deal(bundler, 10e18);
-
-        vm.startPrank(bundler);
-        uint256 gas1 = token.balanceOf(address(userAccount));
-        entryPoint.handleOps(ops, beneficiary);
-        uint256 gas2 = token.balanceOf(address(userAccount));
-
-        PackedUserOperation memory userOp2 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
-        ops[0] = userOp2;
-        entryPoint.handleOps(ops, beneficiary);
-        uint256 gas3 = token.balanceOf(address(userAccount));
-
-        PackedUserOperation memory userOp3 = fillUserOp(address(userAccount), userKey, address(0), 0, "", address(paymaster), 50000, refundPostopCost + 1);
-        ops[0] = userOp3;
-        entryPoint.handleOps(ops, beneficiary);
-        uint256 gas4 = token.balanceOf(address(userAccount));
-
-        console.log("gas 1 :", gas1 - gas2);
-        console.log("gas 2 :", gas2 - gas3);
-        console.log("gas 3 :", gas3 - gas4);
-        vm.stopPrank();
-
-        uint256 balance = token.balanceOf(address(userAccount));
     }
 
-    function testIfMaliciousPaymasterCanDrainUser() external {
-        vm.deal(paymasterOwner, 10e18);
-        vm.startPrank(paymasterOwner);
-        entryPoint.depositTo{value: 10e18}(address(paymaster));
+    function setUser() public {
+        uint256 initBalance = 1e18;
+        token.sudoMint(user, initBalance);
+        vm.deal(user, 1e18);
+
+        vm.startPrank(user);
+        token.approve(address(paymaster), type(uint256).max);
         vm.stopPrank();
-
-        uint256 initialBalance = 10e18;
-
-        vm.deal(user, 2e18);
-        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
-        vm.stopPrank();
-
-        token.sudoMint(address(userAccount), initialBalance);
-        token.sudoApprove(
-            address(userAccount),
-            address(paymaster),
-            initialBalance
-        );
-
-        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
-        PackedUserOperation memory userOp = fillUserOp(
-            address(userAccount),
-            userKey,
-            address(0),
-            0,
-            "",
-            address(paymaster),
-            50000,
-            refundPostopCost + 1
-        );
-
-        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
-        ops[0] = userOp;
-
-        vm.deal(bundler, 10e18);
-
-        // 1. 원래 userOp이 통과하는 것을 보여주고
-        vm.startPrank(bundler);
-        uint256 gas1 = token.balanceOf(address(userAccount));
-        entryPoint.handleOps(ops, beneficiary);
-        uint256 gas2 = token.balanceOf(address(userAccount));
-        vm.stopPrank();
-
-        console.log("1. This userOp can pass 1st validation and waiting for 2nd validation in canonical mempool");
-
-        // 2. userOp이 first validation 통과 후 mempool에서 대기 중일 때, paymaster가 refuncPostopCost를 높였다고 가정
-        TokenPaymaster.TokenPaymasterConfig memory malicioustokenPaymasterConfig = TokenPaymaster.TokenPaymasterConfig({
-            priceMaxAge: 86400,
-            refundPostopCost: 40000, // malicious value
-            minEntryPointBalance: 0,
-            priceMarkup: 1e26
-        });
-
-        vm.startPrank(paymasterOwner);
-        // paymaster.setTokenPaymasterConfig(malicioustokenPaymasterConfig);
-        vm.stopPrank();
-
-        console.log("2. Malicious paymaster changed refundPostopCost to drain user's fund");
-
-        // 3. 이러면 _validatePaymasterUserOp함수의 require문에서 "TPM: postOpGasLimit too low"로 revert되어야함
-        PackedUserOperation memory userOp2 = fillUserOp(
-            address(userAccount),
-            userKey,
-            receiver,
-            1e18,
-            "",
-            address(paymaster),
-            50000,
-            refundPostopCost + 1
-        );
-        ops[0] = userOp2;
-
-        vm.startPrank(bundler);
-        // vm.expectRevert(); // AA33 reverted
-        entryPoint.handleOps(ops, beneficiary);
-        uint256 gas3 = token.balanceOf(address(userAccount));
-        vm.stopPrank();
-
-        //gas 1: 127668000
-        //gas 2: 85762000, 125762000
-        console.log("gas 1:", gas1 - gas2);
-        console.log("gas 2:", gas2 - gas3);
     }
 
     function signUserOp(

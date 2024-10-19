@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.23;
+pragma solidity ^0.8.23;
 
 import "account-abstraction-v7/samples/TokenPaymaster.sol";
 import {IEntryPoint} from "account-abstraction-v7/interfaces/IEntryPoint.sol";
@@ -7,7 +7,7 @@ import {IEntryPoint} from "account-abstraction-v7/interfaces/IEntryPoint.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import {TestOracle2} from "../TestOracle2.sol";
+import {TestOracle2} from "account-abstraction-v7/test/TestOracle2.sol";
 import {Test, console} from "forge-std/Test.sol";
 
 struct OracleHelperConfig {
