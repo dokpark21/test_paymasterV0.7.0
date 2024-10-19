@@ -2,7 +2,7 @@
 pragma solidity ^0.8.23;
 
 // import "account-abstraction-v7/samples/TokenPaymaster.sol";
-import "./TestERC20.sol";
+import "account-abstraction-v7/test/TestERC20.sol";
 import {Test, console} from "forge-std/Test.sol";
 
 contract MaliciousPaymaster {

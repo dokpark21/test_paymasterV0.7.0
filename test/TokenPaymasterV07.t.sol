@@ -6,16 +6,16 @@ import "account-abstraction-v7/samples/SimpleAccountFactory.sol";
 import "account-abstraction-v7/core/EntryPoint.sol";
 import "account-abstraction-v7/samples/SimpleAccount.sol";
 import "account-abstraction-v7/interfaces/PackedUserOperation.sol";
-import "../../utils/TestERC20.sol";
-import "../../utils/TestWrappedNativeToken.sol";
-import "../../utils/TestUniswap.sol";
-import "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
-import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../../utils/paymasterFactory/PaymasterFactoryV07.sol";
+import "account-abstraction-v7/test/TestERC20.sol";
+import "account-abstraction-v7/test/TestWrappedNativeToken.sol";
+import "account-abstraction-v7/test/TestUniswap.sol";
+import "../utils/PaymasterFactoryV07.sol";
+import {OracleHelperConfig, TokenPaymasterConfig, UniswapHelperConfig} from "../utils/PaymasterFactoryV07.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "account-abstraction-v7/core/UserOperationLib.sol";
-import "../../utils/PaymasterProxy.sol";
-import "../../utils/MaliciousPaymaster.sol";
+import "../utils/PaymasterProxy.sol";
+import "../utils/MaliciousPaymaster.sol";
 
 contract TestTokenPaymasterV07 is Test {
     TokenPaymaster paymaster;
