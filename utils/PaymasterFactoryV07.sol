@@ -67,7 +67,7 @@ contract PaymasterFactoryV07 is Ownable {
 
         _tokenPaymasterConfig = TokenPaymasterConfig({
             priceMaxAge: 86400,
-            refundPostopCost: 40000,
+            refundPostopCost: 80000,
             minEntryPointBalance: 0,
             priceMarkup: 1e26
         });

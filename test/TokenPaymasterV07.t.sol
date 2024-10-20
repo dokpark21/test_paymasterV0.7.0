@@ -146,17 +146,17 @@ contract TestTokenPaymasterV07 is Test {
         entryPoint.depositTo{value: 10e18}(address(paymaster));
         vm.stopPrank();
 
-        uint256 initialBalance = 10e18;
+        uint256 initBalance = 10e18;
 
         vm.deal(user, 2e18);
         SimpleAccount userAccount = accountfactory.createAccount(user, 0);
         vm.stopPrank();
 
-        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoMint(address(userAccount), initBalance);
         token.sudoApprove(
             address(userAccount),
             address(paymaster),
-            initialBalance
+            initBalance
         );
 
         // generate userOp, dummy userOp
@@ -169,7 +169,7 @@ contract TestTokenPaymasterV07 is Test {
             "",
             address(paymaster),
             50000,
-            refundPostopCost + 20000 // == 60000 is pass value
+            refundPostopCost + 1
         );
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
@@ -188,7 +188,7 @@ contract TestTokenPaymasterV07 is Test {
             "",
             address(paymaster),
             50000,
-            refundPostopCost * 10
+            refundPostopCost + 1
         );
         ops[0] = userOp2;
         uint256 gas1 = token.balanceOf(address(userAccount));
@@ -205,7 +205,7 @@ contract TestTokenPaymasterV07 is Test {
             "",
             address(paymaster),
             5000000, // *= 100 from userOp 2
-            refundPostopCost * 10
+            refundPostopCost + 1
         );
 
         ops[0] = userOp3;
@@ -216,9 +216,92 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
 
         uint256 balance = token.balanceOf(address(userAccount));
-        assert(initialBalance > balance);
+        assert(initBalance > balance);
 
         assertEq(useGas1, useGas2);
+    }
+
+    // cold access가 warm access보다 gas가 많이 들기 때문에 제대로된 gas 비교를 위해서는 처음에 dummy userOp을 cold access로 보내줘야 함, 이를 증명하기 위한 test case
+    function testColdAccessAndWarmAccess() external {
+        vm.deal(paymasterOwner, 10e18);
+        vm.startPrank(paymasterOwner);
+        entryPoint.depositTo{value: 10e18}(address(paymaster));
+        vm.stopPrank();
+
+        uint256 initialBalance = 10e18;
+
+        vm.deal(user, 1e18);
+        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
+        vm.stopPrank();
+
+        token.sudoMint(address(userAccount), initialBalance);
+        token.sudoApprove(
+            address(userAccount),
+            address(paymaster),
+            initialBalance
+        );
+
+        vm.deal(bundler, 10e18);
+        uint256 gas1 = token.balanceOf(address(userAccount));
+        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
+
+        PackedUserOperation memory userOp = fillUserOp(
+            address(userAccount),
+            userKey,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 1
+        );
+
+        vm.startPrank(bundler);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = userOp;
+        entryPoint.handleOps(ops, beneficiary); // cold access
+        uint256 gas2 = token.balanceOf(address(userAccount));
+
+        PackedUserOperation memory userOp2 = fillUserOp(
+            address(userAccount),
+            userKey,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 1
+        );
+        ops[0] = userOp2;
+        entryPoint.handleOps(ops, beneficiary); // warm access 1
+        uint256 gas3 = token.balanceOf(address(userAccount));
+
+        PackedUserOperation memory userOp3 = fillUserOp(
+            address(userAccount),
+            userKey,
+            address(0),
+            0,
+            "",
+            address(paymaster),
+            50000,
+            refundPostopCost + 1
+        );
+        ops[0] = userOp3;
+        entryPoint.handleOps(ops, beneficiary); // warm access 2
+        uint256 gas4 = token.balanceOf(address(userAccount));
+
+        vm.stopPrank();
+
+        uint256 cold = gas1 - gas2;
+        uint256 warm1 = gas2 - gas3;
+        uint256 warm2 = gas3 - gas4;
+
+        console.log("Cold Access   :", cold);
+        console.log("Warm Access 1 :", warm1);
+        console.log("Warm Access 2 :", warm2);
+
+        assert((cold > warm1) && warm1 == warm2);
     }
 
     /**
@@ -245,96 +328,30 @@ contract TestTokenPaymasterV07 is Test {
             address(paymaster),
             initialBalance
         );
-        // 유저의 userOp이 멤풀에 대기 중일 때 paymaster가 refundPostopCost를 변경(더 높은 값으로)
-        // 멤풀에 대기 중인 상황은 여기서 구현할 수 없으니 상황을 가정하고 테스트 진행
+
         (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
-
-        TokenPaymaster.TokenPaymasterConfig
-            memory maliciousTokenPaymasterConfig = TokenPaymaster
-                .TokenPaymasterConfig({
-                    priceMarkup: 1e26,
-                    minEntryPointBalance: 0,
-                    refundPostopCost: (refundPostopCost / 2) * 3 - 1, // mempool에 대기 중인 userOp의 refundPostopCost보다 1 작은 값으로 설정
-                    priceMaxAge: 0
-                });
-
-        vm.startPrank(paymasterOwner);
-        paymaster.setTokenPaymasterConfig(maliciousTokenPaymasterConfig);
-        vm.stopPrank();
-
-        bytes memory data = "";
-
         PackedUserOperation memory userOp = fillUserOp(
             address(userAccount),
             userKey,
             address(0),
             0,
-            data,
+            "",
             address(paymaster),
             50000,
-            (refundPostopCost / 2) * 3 // if refundPostopCost is 0 or smaller than tokenCofig.refundPostopCost, it must revert
+            refundPostopCost * 3
         );
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = userOp;
 
+        vm.deal(bundler, 10e18);
+
         vm.startPrank(bundler);
-        entryPoint.handleOps(ops, beneficiary); // 이렇게 mempool에 대기 중인 userOp이 있을 때 paymaster의 refundPostopCost를 유저가 설정한 limit 값에 거의 도달하게 설정해 더 많은 가스를 소모하도록 유도
-        vm.stopPrank();
-    }
+        // 1. dummy userOp for cold access
+        entryPoint.handleOps(ops, beneficiary);
 
-    function testBundleRevert() external {
-        address user1;
-        uint256 userKey1;
-        address user2;
-        uint256 userKey2;
-        (user1, userKey1) = makeAddrAndKey("user1");
-        (user2, userKey2) = makeAddrAndKey("user2");
-        vm.deal(paymasterOwner, 10e18);
-        vm.startPrank(paymasterOwner);
-        entryPoint.depositTo{value: 10e18}(address(paymaster));
-        vm.stopPrank();
-
-        vm.deal(user2, 2e18);
-        vm.startPrank(user1);
-        SimpleAccount userAccount1 = accountfactory.createAccount(user1, 0);
-        vm.stopPrank();
-
-        vm.deal(user2, 2e18);
-        vm.startPrank(user2);
-        SimpleAccount userAccount2 = accountfactory.createAccount(user2, 0);
-        vm.stopPrank();
-
-        uint256 initialBalance = 10e18;
-
-        vm.deal(user, 2e18);
-        SimpleAccount userAccount = accountfactory.createAccount(user, 0);
-        vm.stopPrank();
-
-        token.sudoMint(address(userAccount), initialBalance);
-        token.sudoApprove(
-            address(userAccount),
-            address(paymaster),
-            initialBalance
-        );
-
-        token.sudoMint(address(userAccount1), initialBalance);
-        token.sudoApprove(
-            address(userAccount1),
-            address(paymaster),
-            initialBalance
-        );
-
-        token.sudoMint(address(userAccount2), initialBalance);
-        token.sudoApprove(
-            address(userAccount2),
-            address(paymaster),
-            initialBalance
-        );
-
-        // generate userOp, dummy userOp
-        (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
-        PackedUserOperation memory userOp = fillUserOp(
+        // user는 postOpGasLimit를 refundPostopCost의 1.5배로 설정
+        PackedUserOperation memory userOp2 = fillUserOp(
             address(userAccount),
             userKey,
             address(0),
@@ -342,40 +359,52 @@ contract TestTokenPaymasterV07 is Test {
             "",
             address(paymaster),
             50000,
-            refundPostopCost + 10 // == 60000 is pass value
+            refundPostopCost * 3
         );
+        ops[0] = userOp2;
+        // 2. userOp이 정상적인 경우(warm access), 얼마나 cost가 드는지 확인
+        uint256 gas1 = token.balanceOf(address(userAccount));
+        entryPoint.handleOps(ops, beneficiary);
+        uint256 gas2 = token.balanceOf(address(userAccount));
 
-        PackedUserOperation memory userOp1 = fillUserOp(
-            address(userAccount1),
-            userKey1,
+        vm.stopPrank();
+
+        // userOp2와 같은 userOp3 생성
+        PackedUserOperation memory userOp3 = fillUserOp(
+            address(userAccount),
+            userKey,
             address(0),
             0,
             "",
             address(paymaster),
             50000,
-            refundPostopCost + 10000 // == 60000 is pass value
+            refundPostopCost * 3
         );
+        ops[0] = userOp3;
 
-        PackedUserOperation memory userOp2 = fillUserOp(
-            address(userAccount2),
-            userKey2,
-            address(0),
-            0,
-            "",
-            address(paymaster),
-            50000,
-            refundPostopCost + 10000 // == 60000 is pass value
-        );
+        // 3. userOp이 first validation 통과 후 mempool에서 대기 중일 때, paymaster가 refuncPostopCost를 높였다고 가정
+        TokenPaymaster.TokenPaymasterConfig
+            memory malicioustokenPaymasterConfig = TokenPaymaster
+                .TokenPaymasterConfig({
+                    priceMaxAge: 86400,
+                    refundPostopCost: (refundPostopCost * 3) - 1, // malicious value (postOpGasLimit의 1.5배보다 1 작게 설정)
+                    minEntryPointBalance: 0,
+                    priceMarkup: 1e26
+                });
 
-        PackedUserOperation[] memory ops = new PackedUserOperation[](3);
-        ops[0] = userOp;
-        ops[1] = userOp1;
-        ops[2] = userOp2;
+        vm.startPrank(paymasterOwner);
+        paymaster.setTokenPaymasterConfig(malicioustokenPaymasterConfig);
+        // console.log("paymaster changed refundPostopCost to malicious value");
+        vm.stopPrank();
 
-        vm.deal(bundler, 10e18);
-
+        // 4. 같은 userOp을 다시 보냈을 때의 cost 확인 (대기중이던 userOp이 실행됐을 때)
         vm.startPrank(bundler);
         entryPoint.handleOps(ops, beneficiary);
+        vm.stopPrank();
+
+        uint256 gas3 = token.balanceOf(address(userAccount));
+
+        assert(gas2 - gas3 > gas1 - gas2); // user는 원래 내야 하는 cost보다 높은 cost를 내야 하게 됨
     }
 
     // 악의적인 페이마스터 공격 로직
