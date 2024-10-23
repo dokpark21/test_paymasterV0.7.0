@@ -26,7 +26,7 @@ contract VerifyingPaymasterV07 is Test {
         paymaster = new VerifyingPaymaster(entryPoint, paymasterOwner);
     }
 
-    // paymasterOwner가 서명
+    // paymasterOwner signs
     function testValdiatePaymasterUserOpRevert() external {
         PackedUserOperation memory op = fillUserOp(
             user,

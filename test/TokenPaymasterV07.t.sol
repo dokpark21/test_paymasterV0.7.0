@@ -75,10 +75,7 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
     }
 
-    // refundPostOpCost 검사
-    // postOp 단계에서 transfer를 통해 정확히 돌려주나
-    // withDrawTo가 있냐
-
+    // Check if priceMarkup can be set to an invalid value
     function testPriceMarkUpisValid() external {
         // pricePriceMarkUp
         // if PRICE_DENOMINATOR is different, please change it
@@ -99,13 +96,7 @@ contract TestTokenPaymasterV07 is Test {
         vm.stopPrank();
     }
 
-    // 고도화 필요
-    /**
-        paymasterAndData 생성
-        user의 key로 sign
-        handleOps 호출
-     */
-    // validation에서 user의 token이 빠져나갔는지 확인
+    // Check if the user's token was leaked in validation 
     function testGetFundInValidation() external {
         uint256 initBalance = 1e10;
         token.sudoMint(user, initBalance);
@@ -140,6 +131,7 @@ contract TestTokenPaymasterV07 is Test {
         assert(initBalance > balance);
     }
 
+    // Check if changing validationGas still consumes the same gas fee
     function testAfterBalances() external {
         vm.deal(paymasterOwner, 10e18);
         vm.startPrank(paymasterOwner);
@@ -159,7 +151,7 @@ contract TestTokenPaymasterV07 is Test {
             initBalance
         );
 
-        // generate userOp, dummy userOp
+        // generate userOp, dummy userOp for cold access
         (, , uint48 refundPostopCost, ) = paymaster.tokenPaymasterConfig();
         PackedUserOperation memory userOp = fillUserOp(
             address(userAccount),
@@ -221,7 +213,7 @@ contract TestTokenPaymasterV07 is Test {
         assertEq(useGas1, useGas2);
     }
 
-    // cold access가 warm access보다 gas가 많이 들기 때문에 제대로된 gas 비교를 위해서는 처음에 dummy userOp을 cold access로 보내줘야 함, 이를 증명하기 위한 test case
+    // Check difference between cold access and warm access
     function testColdAccessAndWarmAccess() external {
         vm.deal(paymasterOwner, 10e18);
         vm.startPrank(paymasterOwner);
@@ -304,12 +296,6 @@ contract TestTokenPaymasterV07 is Test {
         assert((cold > warm1) && warm1 == warm2);
     }
 
-    /**
-    이거 하나 dummy로 보내고
-    일단 userOp보내고 gas소모 확인
-    paymaster가 update
-    같은거 또 보내기    
-     */
     function testIfMaliciousPaymasterCanDrainUser() external {
         vm.deal(paymasterOwner, 10e18);
         vm.startPrank(paymasterOwner);
@@ -350,7 +336,6 @@ contract TestTokenPaymasterV07 is Test {
         // 1. dummy userOp for cold access
         entryPoint.handleOps(ops, beneficiary);
 
-        // user는 postOpGasLimit를 refundPostopCost의 1.5배로 설정
         PackedUserOperation memory userOp2 = fillUserOp(
             address(userAccount),
             userKey,
@@ -362,14 +347,15 @@ contract TestTokenPaymasterV07 is Test {
             refundPostopCost * 3
         );
         ops[0] = userOp2;
-        // 2. userOp이 정상적인 경우(warm access), 얼마나 cost가 드는지 확인
+
+        // 2. Check warm access userOp cost
         uint256 gas1 = token.balanceOf(address(userAccount));
         entryPoint.handleOps(ops, beneficiary);
         uint256 gas2 = token.balanceOf(address(userAccount));
 
         vm.stopPrank();
 
-        // userOp2와 같은 userOp3 생성
+        // create userOp3 equal to userOp2 
         PackedUserOperation memory userOp3 = fillUserOp(
             address(userAccount),
             userKey,
@@ -382,7 +368,7 @@ contract TestTokenPaymasterV07 is Test {
         );
         ops[0] = userOp3;
 
-        // 3. userOp이 first validation 통과 후 mempool에서 대기 중일 때, paymaster가 refuncPostopCost를 높였다고 가정
+        // 3. Assume the paymaster increased the refundPostOpCost while the userOp is waiting in the mempool after passing 1st validation.  
         TokenPaymaster.TokenPaymasterConfig
             memory malicioustokenPaymasterConfig = TokenPaymaster
                 .TokenPaymasterConfig({
@@ -397,23 +383,17 @@ contract TestTokenPaymasterV07 is Test {
         // console.log("paymaster changed refundPostopCost to malicious value");
         vm.stopPrank();
 
-        // 4. 같은 userOp을 다시 보냈을 때의 cost 확인 (대기중이던 userOp이 실행됐을 때)
+        // 4. Check the cost when the same userOp is sent again
         vm.startPrank(bundler);
         entryPoint.handleOps(ops, beneficiary);
         vm.stopPrank();
 
         uint256 gas3 = token.balanceOf(address(userAccount));
 
-        assert(gas2 - gas3 > gas1 - gas2); // user는 원래 내야 하는 cost보다 높은 cost를 내야 하게 됨
+        assert(gas2 - gas3 > gas1 - gas2);
     }
 
-    // 악의적인 페이마스터 공격 로직
-    /**
-        1. 업그레이드 가능한 페이마스터 생성
-        2. 유저들이 페이마스터를 사용하게 되고 악의적인 페이마스터는 계속해서 정상적으로 작동
-        3. 유저가 충분히 모이고 approve된 금액이 일정 수준 이상이 되었다 싶으면 악의적인 페이마스터로 업그레이드
-        4. transferFrom 같은 함수를 심어 유저의 모든 토큰을 빼낸다.    
-    */
+    // malicious paymaster's attack logic
     function testIfPaymasterIsUpgradealble() external {
         address user1 = makeAddr("user1");
         address user2 = makeAddr("user2");
@@ -587,7 +567,7 @@ contract TestTokenPaymasterV07 is Test {
         op.signature = signUserOp(op, _key);
         return op;
     }
-    // 660000000
+
     function fillpaymasterAndData(
         address _paymaster,
         uint256 _validationGas,
@@ -595,9 +575,9 @@ contract TestTokenPaymasterV07 is Test {
     ) public view returns (bytes memory paymasterAndDataStatic) {
         paymasterAndDataStatic = abi.encodePacked(
             address(_paymaster),
-            uint128(_validationGas), // validation gas
-            uint128(_postOpGas), // postOp gas
-            uint256(1e26) // clientSuppliedPrice
+            uint128(_validationGas),    // validation gas
+            uint128(_postOpGas),        // postOp gas
+            uint256(1e26)                // clientSuppliedPrice
         );
     }
 }
